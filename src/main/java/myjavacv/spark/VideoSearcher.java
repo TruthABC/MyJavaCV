@@ -5,6 +5,9 @@ import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.bytedeco.javacpp.FloatPointer;
+import org.bytedeco.javacpp.IntPointer;
+import org.bytedeco.javacpp.PointerPointer;
 import org.bytedeco.javacpp.opencv_core.*;
 import org.bytedeco.javacv.*;
 import scala.Tuple2;
@@ -15,8 +18,8 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.bytedeco.javacpp.helper.opencv_imgcodecs.cvLoadImage;
 import static org.bytedeco.javacpp.opencv_core.*;
+import static org.bytedeco.javacpp.opencv_imgcodecs.imread;
 import static org.bytedeco.javacpp.opencv_imgproc.*;
 
 public class VideoSearcher implements Serializable {
@@ -26,7 +29,7 @@ public class VideoSearcher implements Serializable {
 
     private final String DUMP_PATH_1 = "search_image_by_video";
 
-    private String mImagePath = "winner.png";
+    private String mImagePath = "winner2.png";
     private String mVideoPath = "EP00.mp4";
 
     public VideoSearcher() {}
@@ -86,10 +89,11 @@ public class VideoSearcher implements Serializable {
                     break;
                 }
 
+                // Dump image for debug
                 long timeNow = grabber.getTimestamp();
                 ImageIO.write(new Java2DFrameConverter().convert(frame) , "png", new File(DUMP_PATH_1 + "/" + timeNow + ".png"));
-//                double similarity = compareFrameToImage(frame, mImagePath);
-                double similarity = compareFrameToImageOpenCV(frame, mImagePath);
+
+                double similarity = calculateSimilarity(frame, mImagePath);
                 if (maxSimilarity < similarity) {
                     maxSimilarity = similarity;
                     maxSimTime = timeNow;
@@ -102,176 +106,71 @@ public class VideoSearcher implements Serializable {
             }
             grabber.stop();
 
+            System.out.println("Time: " + maxSimTime);
+            System.out.println("Simi: " + maxSimilarity);
             return new Tuple2<>(maxSimTime, maxSimilarity);
         });
 
-        // After all map run and get similarities
-        similarityRDD.foreach((t) -> {
-            System.out.println("Time: " + t._1);
-            System.out.println("Simi: " + t._2);
+        // Get max similarity
+        Tuple2<Long, Double> maxTuple = similarityRDD.reduce((x, y) -> {
+            if (x._2 < y._2) {
+                return y;
+            } else {
+                return x;
+            }
         });
 
-//        double maxKey = similarityRDD.keys().max((x,y) -> {
-//            if (x - y > 0) {
-//                return 1;
-//            } else if (x - y < 0) {
-//                return -1;
-//            } else {
-//                return 0;
-//            }
-//        });
-//
-//        JavaPairRDD<Double,Long> withMaxKeys = similarityRDD.filter((x)->{
-//            return x._1 == maxKey;
-//        });
-//
-//        withMaxKeys.foreach((t)->{
-//            System.out.print("MaxSim: " + t._1);
-//            System.out.print("MaxTim: " + (t._2 / SEC));
-//        });
+        // show max similarity
+        System.out.println("MaxSimTime: " + maxTuple._1);
+        System.out.println("MaxSimilarity: " + maxTuple._2);
+
     }
 
-    private double compareFrameToImageOpenCV(Frame frame, String imagePath) {
-
-        // Convert Frame to IplImage as source image
-        OpenCVFrameConverter.ToIplImage converterToIplImage = new OpenCVFrameConverter.ToIplImage();
-        final IplImage src = converterToIplImage.convert(frame);
+    /**
+     *
+     * @param frame the from some timestamp
+     * @param imagePath the reference path
+     * @return the bigger, the more similar (0 to 1)
+     */
+    private double calculateSimilarity(Frame frame, String imagePath) {
+        // Convert Frame as source image
+        final Mat src = new OpenCVFrameConverter.ToMat().convert(frame);
 
         // Get reference image
-        final IplImage ref = cvLoadImage(imagePath);
+        final Mat ref = imread(imagePath);
 
-        //1
-        IplImage hsvImageSrc = cvCreateImage(src.cvSize(), src.depth(), 3);
-        cvCvtColor(src, hsvImageSrc, CV_BGR2HSV);
-        // Split the 3 channels into 3 images
-        IplImageArray hsvChannelsSrc = splitChannels(hsvImageSrc);
-        //bins and value-range
-        int numberOfBins = 50;
-        float minRange = 0f;
-        float maxRange = 180f;
-        // Allocate histogram object
-        int[]sizes = new int[]{numberOfBins};
-        int histType = CV_HIST_ARRAY;
-        float[] minMax = new  float[]{minRange, maxRange};
-        float[][] ranges = new float[][]{minMax};
-        CvHistogram histSrc = cvCreateHist(1, sizes, histType, ranges, 1);
-        // Compute histogram
-        cvCalcHist(hsvChannelsSrc.position(0), histSrc, 0, null);
+        // Transfer to HSV
+        cvtColor(src, src, CV_BGR2HSV);
+        cvtColor(ref, ref, CV_BGR2HSV);
 
-        //2
-        IplImage hsvImageRef= cvCreateImage(ref.cvSize(), ref.depth(), 3);
-        cvCvtColor(ref, hsvImageRef, CV_BGR2HSV);
-        // Split the 3 channels into 3 images
-        IplImageArray hsvChannelsRef = splitChannels(hsvImageRef);
-        // Allocate histogram object
-        CvHistogram histRef = cvCreateHist(1, sizes, histType, ranges, 1);
-        // Compute histogram
-        cvCalcHist(hsvChannelsRef.position(0), histRef, 0, null);
+        // Arranging parameters for Histogram
+        int h_bins = 50;
+        int s_bins = 60;
+        IntPointer histSize = new IntPointer(50, 60);
 
-        double similarity = compareHist(cvarrToMat(histRef.bins()), cvarrToMat(histSrc.bins()), CV_COMP_CORREL);
+        FloatPointer h_ranges = new FloatPointer(0, 180);
+        FloatPointer s_ranges = new FloatPointer(0, 256);
+        PointerPointer ranges = new PointerPointer(h_ranges, s_ranges);
+
+        IntPointer channels = new IntPointer(0, 1);
+        Mat mask = new Mat();
+
+        Mat hist_src = new Mat();
+        Mat hist_ref = new Mat();
+
+        // Get histograms and normalize them
+        calcHist(src, 1, channels, mask, hist_src, 2, histSize, ranges, true, false);
+        normalize(hist_src, hist_src, 0, 1, NORM_MINMAX, -1, new Mat());
+
+        calcHist(ref, 1, channels, mask, hist_ref, 2, histSize, ranges, true, false);
+        normalize(hist_ref, hist_ref, 0, 1, NORM_MINMAX, -1, new Mat());
+
+        double similarity = compareHist(hist_src, hist_ref, CV_COMP_CORREL);
 
         return similarity;
     }
 
     /******************************************************************************************************************/
-
-    /**
-     *
-     * @return the similarity between frame and image
-     * @param frame the "Frame" object
-     * @param imagePath the path of image to be compared
-     */
-    private double compareFrameToImage(Frame frame, String imagePath) {
-
-        // Convert Frame to IplImage as source image
-        OpenCVFrameConverter.ToIplImage converterToIplImage = new OpenCVFrameConverter.ToIplImage();
-        final IplImage src = converterToIplImage.convert(frame);
-
-        // Get histogram of src
-        double[] hBinsSrc = new double[50];
-        double[] sBinsSrc = new double[60];
-        fillInHSBins(hBinsSrc, sBinsSrc, src);
-
-        // Get reference image
-        final IplImage ref = cvLoadImage(imagePath);
-
-        // Get histogram of ref
-        double[] hBinsRef = new double[50];
-        double[] sBinsRef = new double[60];
-        fillInHSBins(hBinsRef, sBinsRef, ref);
-
-        double similarity = compareDis(hBinsSrc, sBinsSrc, hBinsRef, sBinsRef);
-
-        return similarity;
-    }
-
-    /**
-     * Get histogram in bins
-     * @param hBins Hue Channel
-     * @param sBins S Channel
-     * @param img the image
-     */
-    private void fillInHSBins(double[] hBins, double[] sBins, IplImage img) {
-        CvSize size = img.cvSize();
-        int depth = img.depth();
-        int hBinNum = hBins.length;
-        int sBinNum = sBins.length;
-
-        // Create empty image (placeholder)
-        final IplImage hsvImage = cvCreateImage(size, depth, 3);
-        // Convert "img" (BGR) to "HSV" form
-        cvCvtColor(img, hsvImage, CV_BGR2HSV);
-
-        // Start get histogram
-        for (int i = 0; i < size.height(); i++) {
-            for (int j = 0; j < size.width(); j++) {
-                CvScalar s = cvGet2D(hsvImage, i, j);
-                double hVal = s.val(0);
-                double sVal = s.val(1);
-                hBins[(int)(hVal / 180 * hBinNum)] += 1.0;
-                sBins[(int)(sVal / 256 * sBinNum)] += 1.0;
-            }
-        }
-
-        // Normalization
-        int all = size.height() * size.width();
-        for (int i = 0; i < hBinNum; i++) {
-            hBins[i] /= all;
-        }
-        for (int i = 0; i < sBinNum; i++) {
-            sBins[i] /= all;
-        }
-    }
-
-    /**
-     * Compare Former half bins to Later half bins (Manhattan Distance)
-     * @param bins
-     * @return
-     */
-    private double compareDis(double[]... bins) {
-        int n = bins.length;
-        double distance = 0;
-        double maxDistance = n;
-        for (int i = 0, j = n/2; j < n; i++, j++) {
-            int len = bins[i].length;
-            for (int k = 0; k < len ;k++) {
-                distance += Math.abs(bins[i][k] - bins[j][k]);
-            }
-        }
-        double similarity = 1 - distance / maxDistance;
-        return similarity;
-    }
-
-    private IplImageArray splitChannels(IplImage hsvImage) {
-        CvSize size = hsvImage.cvSize();
-        int depth=hsvImage.depth();
-        IplImage channel0 = cvCreateImage(size, depth, 1);
-        IplImage channel1 = cvCreateImage(size, depth, 1);
-        IplImage channel2 = cvCreateImage(size, depth, 1);
-        cvSplit(hsvImage, channel0, channel1, channel2, null);
-        return new IplImageArray(channel0, channel1, channel2);
-    }
-
     public static void main(String[] args) throws FrameGrabber.Exception {
         new VideoSearcher().searchImageByVideo();
     }
