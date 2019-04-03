@@ -4,6 +4,13 @@ import java.io.File;
 
 public class Global {
 
+    public static void deleteAndMkdirs(File dir) {
+        if (dir.exists()) {
+            deleteDir(dir);
+        }
+        dir.mkdirs();
+    }
+
     public static void deleteDir(File dir) {
         if (!dir.exists()) {
             return;

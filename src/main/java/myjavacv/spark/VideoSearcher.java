@@ -1,13 +1,11 @@
 package myjavacv.spark;
 
 import myjavacv.Global;
+import myjavacv.GlobalCV;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.bytedeco.javacpp.FloatPointer;
-import org.bytedeco.javacpp.IntPointer;
-import org.bytedeco.javacpp.PointerPointer;
 import org.bytedeco.javacpp.opencv_core.*;
 import org.bytedeco.javacv.*;
 import scala.Tuple2;
@@ -18,7 +16,6 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.bytedeco.javacpp.opencv_core.*;
 import static org.bytedeco.javacpp.opencv_imgcodecs.imread;
 import static org.bytedeco.javacpp.opencv_imgproc.*;
 
@@ -29,8 +26,8 @@ public class VideoSearcher implements Serializable {
 
     private final String DUMP_PATH_1 = "search_image_by_video";
 
-    private String mImagePath = "winner2.png";
     private String mVideoPath = "EP00.mp4";
+    private String mImagePath = "winner2.png";
 
     public VideoSearcher() {}
 
@@ -45,10 +42,7 @@ public class VideoSearcher implements Serializable {
     public void searchImageByVideo() throws FrameGrabber.Exception {
         // History Dump File delete
         File dumpDir = new File(DUMP_PATH_1);
-        if (dumpDir.exists()) {
-            Global.deleteDir(dumpDir);
-        }
-        dumpDir.mkdirs();
+        Global.deleteAndMkdirs(dumpDir);
 
         // Init to get video length
         FFmpegFrameGrabber grabber4Init = new FFmpegFrameGrabber(mVideoPath);
@@ -83,6 +77,7 @@ public class VideoSearcher implements Serializable {
                 grabber.setTimestamp(startTime);
             }
 
+            Mat hist_ref = GlobalCV.getHSVHistogram(imread(mImagePath));
             while (true) {
                 Frame frame = grabber.grabImage();
                 if (frame == null) {
@@ -93,7 +88,7 @@ public class VideoSearcher implements Serializable {
                 long timeNow = grabber.getTimestamp();
                 ImageIO.write(new Java2DFrameConverter().convert(frame) , "png", new File(DUMP_PATH_1 + "/" + timeNow + ".png"));
 
-                double similarity = calculateSimilarity(frame, mImagePath);
+                double similarity = calculateSimilarity(frame, hist_ref);
                 if (maxSimilarity < similarity) {
                     maxSimilarity = similarity;
                     maxSimTime = timeNow;
@@ -129,41 +124,12 @@ public class VideoSearcher implements Serializable {
     /**
      *
      * @param frame the from some timestamp
-     * @param imagePath the reference path
      * @return the bigger, the more similar (0 to 1)
      */
-    private double calculateSimilarity(Frame frame, String imagePath) {
-        // Convert Frame as source image
+    private double calculateSimilarity(Frame frame, Mat hist_ref) {
+        // Convert Frame as source image, Transfer to HSV
         final Mat src = new OpenCVFrameConverter.ToMat().convert(frame);
-
-        // Get reference image
-        final Mat ref = imread(imagePath);
-
-        // Transfer to HSV
-        cvtColor(src, src, CV_BGR2HSV);
-        cvtColor(ref, ref, CV_BGR2HSV);
-
-        // Arranging parameters for Histogram
-        int h_bins = 50;
-        int s_bins = 60;
-        IntPointer histSize = new IntPointer(50, 60);
-
-        FloatPointer h_ranges = new FloatPointer(0, 180);
-        FloatPointer s_ranges = new FloatPointer(0, 256);
-        PointerPointer ranges = new PointerPointer(h_ranges, s_ranges);
-
-        IntPointer channels = new IntPointer(0, 1);
-        Mat mask = new Mat();
-
-        Mat hist_src = new Mat();
-        Mat hist_ref = new Mat();
-
-        // Get histograms and normalize them
-        calcHist(src, 1, channels, mask, hist_src, 2, histSize, ranges, true, false);
-        normalize(hist_src, hist_src, 0, 1, NORM_MINMAX, -1, new Mat());
-
-        calcHist(ref, 1, channels, mask, hist_ref, 2, histSize, ranges, true, false);
-        normalize(hist_ref, hist_ref, 0, 1, NORM_MINMAX, -1, new Mat());
+        Mat hist_src = GlobalCV.getHSVHistogram(src);
 
         double similarity = compareHist(hist_src, hist_ref, CV_COMP_CORREL);
 
